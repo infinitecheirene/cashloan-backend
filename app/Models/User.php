@@ -1,0 +1,149 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
+
+class User extends Authenticatable implements MustVerifyEmail
+{
+    use HasApiTokens, HasFactory, Notifiable, SoftDeletes;
+
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var array<int, string>
+     */
+    protected $fillable = [
+        'first_name',
+        'last_name',
+        'email',
+        'password',
+        'role',
+        'phone',
+        'address',
+        'city',
+        'state',
+        'postal_code',
+        'country',
+        'credit_score',
+        'is_active',
+    ];
+
+    /**
+     * The attributes that should be hidden for serialization.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    /**
+     * The attributes that should be cast.
+     *
+     * @var array<string, string>
+     */
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'password' => 'hashed',
+        'is_active' => 'boolean',
+    ];
+
+    /**
+     * IMPORTANT FIX: Append 'name' attribute to JSON serialization
+     * This makes $user->name available in API responses
+     *
+     * @var array<int, string>
+     */
+    protected $appends = ['name'];
+
+    /**
+     * Get all loans where user is borrower
+     */
+    public function borrowedLoans(): HasMany
+    {
+        return $this->hasMany(Loan::class, 'borrower_id');
+    }
+
+    /**
+     * Get all loans where user is lender
+     */
+    public function lentLoans(): HasMany
+    {
+        return $this->hasMany(Loan::class, 'lender_id');
+    }
+
+    /**
+     * Get all loans processed by loan officer
+     */
+    public function processedLoans(): HasMany
+    {
+        return $this->hasMany(Loan::class, 'loan_officer_id');
+    }
+
+    /**
+     * Check if user is admin
+     */
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
+
+    /**
+     * Check if user is lender
+     */
+    public function isLender(): bool
+    {
+        return $this->role === 'lender';
+    }
+
+    /**
+     * Check if user is borrower
+     */
+    public function isBorrower(): bool
+    {
+        return $this->role === 'borrower';
+    }
+
+    /**
+     * Check if user is loan officer
+     */
+    public function isLoanOfficer(): bool
+    {
+        return $this->role === 'loan_officer';
+    }
+
+    /**
+     * IMPORTANT FIX: Changed from getFullNameAttribute to getNameAttribute
+     * This creates a 'name' attribute (not 'full_name')
+     * Now $user->name will work and appear in JSON as "name"
+     */
+    public function getNameAttribute(): string
+    {
+        return trim($this->first_name . ' ' . $this->last_name);
+    }
+
+    /**
+     * Keep the full_name accessor for backwards compatibility
+     * if you're using it elsewhere in your code
+     */
+    public function getFullNameAttribute(): string
+    {
+        return $this->getName();
+    }
+
+    /**
+     * Helper method to get name (can be used by both accessors)
+     */
+    private function getName(): string
+    {
+        return trim($this->first_name . ' ' . $this->last_name);
+    }
+}
