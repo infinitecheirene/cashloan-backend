@@ -9,59 +9,98 @@ use App\Http\Controllers\PaymentController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/health', function () {
-    return response()->json(['status' => 'OK']);
+// Health check
+Route::get('/health', fn() => response()->json(['status' => 'OK']));
+
+// ------------------
+// Public Auth Routes
+// ------------------
+Route::prefix('auth')->group(function () {
+    Route::post('register', [AuthController::class, 'register']);
+    Route::post('login', [AuthController::class, 'login']);
+    Route::post('forgot-password', [AuthController::class, 'forgotPassword']);
+    Route::post('reset-password', [AuthController::class, 'resetPassword']);
 });
 
-// Public routes
-Route::post('/auth/register', [AuthController::class, 'register']);
-Route::post('/auth/login', [AuthController::class, 'login']);
-Route::post('/auth/forgot-password', [AuthController::class, 'forgotPassword']);
-Route::post('/auth/reset-password', [AuthController::class, 'resetPassword']);
-
-// Protected routes
+// ------------------
+// Protected Routes
+// ------------------
 Route::middleware('auth:sanctum')->group(function () {
-    // Auth routes
-    Route::get('/auth/me', [AuthController::class, 'me']);
-    Route::post('/auth/logout', [AuthController::class, 'logout']);
-    Route::post('/auth/verify-email', [AuthController::class, 'verifyEmail']);
-    Route::post('/auth/resend-email-verification', [AuthController::class, 'resendEmailVerification']);
-    Route::post('/auth/change-password', [AuthController::class, 'changePassword']);
-    Route::get('/user', function (Request $request) {
-        return $request->user();
+
+    // Auth
+    Route::prefix('auth')->group(function () {
+        Route::get('me', [AuthController::class, 'me']);
+        Route::post('logout', [AuthController::class, 'logout']);
+        Route::post('verify-email', [AuthController::class, 'verifyEmail']);
+        Route::post('resend-email-verification', [AuthController::class, 'resendEmailVerification']);
+        Route::post('change-password', [AuthController::class, 'changePassword']);
+        Route::get('profile', [AuthController::class, 'profile']);
     });
 
-    // Loan statistics (must be before {loan} route to avoid conflicts)
-    Route::get('/loans/statistics/user', [LoanController::class, 'statistics']);
+    // ------------------
+    // Loan Routes
+    // ------------------
+    Route::prefix('loans')->group(function () {
 
-    // Loan CRUD
-    Route::get('/loans', [LoanController::class, 'index']);
-    Route::post('/loans', [LoanController::class, 'store']);
-    Route::get('/loans/{loan}', [LoanController::class, 'show']);
-    Route::put('/loans/{loan}', [LoanController::class, 'update']);
+        // Statistics
+        Route::get('statistics/user', [LoanController::class, 'statistics']);
 
-    // Loan actions
-    Route::post('/loans/{loan}/approve', [LoanController::class, 'approve']);
-    Route::post('/loans/{loan}/reject', [LoanController::class, 'reject']);
-    Route::post('/loans/{loan}/activate', [LoanController::class, 'activate']);
+        // CRUD
+        Route::get('/', [LoanController::class, 'index']);
+        Route::post('/', [LoanController::class, 'store']);
+        Route::get('{loan}', [LoanController::class, 'show']);
+        Route::put('{loan}', [LoanController::class, 'update']);
 
-    // Document download
-    Route::get('/loans/{loan}/documents/{document}/download', [LoanController::class, 'downloadDocument']);
+        // Actions
+        Route::post('{loan}/approve', [LoanController::class, 'approve']);
+        Route::post('{loan}/reject', [LoanController::class, 'reject']);
+        Route::post('{loan}/activate', [LoanController::class, 'activate']);
 
-    // Payment routes - specific routes MUST come before parameterized routes
-    Route::get('/payments/upcoming', [PaymentController::class, 'upcoming']);
-    Route::get('/payments/overdue', [PaymentController::class, 'overdue']);
-    Route::post('/payments', [PaymentController::class, 'recordPayment']);
-    Route::get('/loans/{loan}/payments', [PaymentController::class, 'index']);
-    Route::post('/loans/{loan}/payments', [PaymentController::class, 'store']);
-    Route::get('/payments/{payment}', [PaymentController::class, 'show']);
+        // Documents
+        Route::get('{loan}/documents/{document}/download', [LoanController::class, 'downloadDocument']);
 
-    // Loan Officer 
-    Route::get('/loan-officers', [LoanOfficerController::class, 'index']);
+        // Loan payments
+        Route::get('{loan}/payments', [PaymentController::class, 'index']);
+        Route::post('{loan}/payments', [PaymentController::class, 'store']);
+    });
 
-    // Lenders
-    Route::get('/lenders', [LenderController::class, 'index']);
+    // ------------------
+    // Payment Routes
+    // ------------------
+    Route::get('payments/upcoming', [PaymentController::class, 'upcoming']);
+    Route::get('payments/overdue', [PaymentController::class, 'overdue']);
+    Route::get('payments/{payment}', [PaymentController::class, 'show']);
+    Route::post('payments', [PaymentController::class, 'recordPayment']);
 
-    // Borrower
-    Route::get('/borrowers', [BorrowerController::class, 'index']);
+    // ------------------
+    // Users / Borrowers / Lenders / Officers
+    // ------------------
+    Route::get('user', fn(Request $request) => $request->user());
+
+    Route::get('borrowers', [BorrowerController::class, 'index']);
+    Route::get('borrowers/{borrower}/loans', [LoanController::class, 'getBorrowerLoans']);
+
+    Route::get('lenders', [LenderController::class, 'index']);
+    Route::get('lender/dashboard', [LenderController::class, 'dashboard']);
+    Route::get('loan-officers', [LoanOfficerController::class, 'index']);
+
+    // ------------------
+    // Admin dashboard
+    // ------------------
+    Route::get('admin/dashboard', function () {
+        try {
+            $users = App\Models\User::all();
+            $loans = App\Models\Loan::with(['borrower', 'lender', 'loanOfficer'])->get();
+
+            return response()->json([
+                'users' => $users,
+                'loans' => $loans,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'Server error fetching dashboard data',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    });
 });

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
+use App\Models\Loan;
 
 class LenderController extends Controller
 {
@@ -24,17 +25,17 @@ class LenderController extends Controller
         // Optional search query (?q=searchTerm)
         if ($request->has('q')) {
             $search = $request->get('q');
-            $query->where(function($q) use ($search) {
+            $query->where(function ($q) use ($search) {
                 $q->where('first_name', 'like', "%{$search}%")
-                  ->orWhere('last_name', 'like', "%{$search}%")
-                  ->orWhere('email', 'like', "%{$search}%");
+                    ->orWhere('last_name', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%");
             });
         }
 
         $lenders = $query->select('id', 'first_name', 'last_name', 'email')->get();
 
         // Combine first + last name for frontend
-        $lenders = $lenders->map(function($lender) {
+        $lenders = $lenders->map(function ($lender) {
             return [
                 'id' => $lender->id,
                 'name' => $lender->first_name . ' ' . $lender->last_name,
@@ -46,4 +47,31 @@ class LenderController extends Controller
             'lenders' => $lenders
         ]);
     }
+
+    public function dashboard(Request $request)
+    {
+        $user = $request->user();
+
+        // Only lender can access
+        if ($user->role !== 'lender') {
+            return response()->json([
+                'message' => 'Unauthorized'
+            ], 403);
+        }
+
+        $loans = Loan::with('borrower')
+            ->where('lender_id', $user->id)
+            ->get();
+
+        return response()->json([
+            'user' => [
+                'id' => $user->id,
+                'first_name' => $user->first_name,
+                'last_name' => $user->last_name,
+                'email' => $user->email,
+            ],
+            'loans' => $loans,
+        ]);
+    }
+
 }
