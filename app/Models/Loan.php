@@ -10,9 +10,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Loan extends Model
 {
     use HasFactory;
-    protected $appends = ['amount'];
+
     protected $fillable = [
-        'user_id',
         'borrower_id',
         'lender_id',
         'loan_officer_id',
@@ -24,11 +23,18 @@ class Loan extends Model
         'purpose',
         'employment_status',
         'status',
+        'notes',
         'approved_at',
         'rejected_at',
         'rejection_reason',
         'start_date',
         'first_payment_date',
+
+        // ... existing fields
+        'receiver_wallet_name',
+        'receiver_wallet_number',
+        'receiver_wallet_email',
+        'receiver_wallet_proof',
         'notes',
     ];
 
@@ -42,6 +48,8 @@ class Loan extends Model
         'start_date' => 'date',
         'first_payment_date' => 'date',
     ];
+
+    protected $appends = ['amount'];
 
     /**
      * Get the borrower (user) that owns the loan
@@ -146,16 +154,27 @@ class Loan extends Model
     {
         return $this->status === 'completed';
     }
+
+    /**
+     * Get amount accessor for compatibility
+     */
     public function getAmountAttribute(): string
     {
         return $this->principal_amount ?? '0.00';
     }
-    public function user()
+
+    /**
+     * Get outstanding balance
+     */
+    public function getOutstandingBalanceAttribute()
     {
-        return $this->belongsTo(User::class);
-    }
-    public function scopeCurrentlyActive($query)
-    {
-        return $query->where('status', 'approved')->where('outstanding_balance', '>', 0);
+        if (!$this->isActive() && !$this->isCompleted()) {
+            return null;
+        }
+
+        $totalPaid = $this->payments()->where('status', 'completed')->sum('amount');
+        $balance = $this->approved_amount - $totalPaid;
+
+        return max(0, $balance);
     }
 }

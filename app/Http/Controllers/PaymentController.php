@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class PaymentController extends Controller
 {
@@ -17,6 +18,578 @@ class PaymentController extends Controller
     ) {
         $this->middleware('auth:sanctum');
     }
+
+    // ========================================
+    // LENDER-SPECIFIC METHODS (FIXED)
+    // ========================================
+
+    /**
+     * Get all payments for the authenticated lender
+     * GET /api/lender/payments
+     * 
+     * FIXED: Using direct JOIN instead of whereHas for better performance and reliability
+     */
+    public function indexForLender(Request $request)
+    {
+        try {
+            $user = $request->user();
+
+            Log::info('Fetching payments for lender', ['lender_id' => $user->id]);
+
+            // FIXED: Use direct JOIN approach - more reliable and performant
+            $query = DB::table('payments')
+                ->join('loans', 'payments.loan_id', '=', 'loans.id')
+                ->join('users as borrowers', 'loans.borrower_id', '=', 'borrowers.id')
+                ->where('loans.lender_id', $user->id)
+                ->select(
+                    'payments.*',
+                    'loans.id as loan_id_full',
+                    'loans.type as loan_type',
+                    'loans.principal_amount',
+                    'loans.approved_amount',
+                    'loans.interest_rate',
+                    'loans.status as loan_status',
+                    'loans.term_months',
+                    'loans.purpose',
+                    'loans.outstanding_balance',
+                    DB::raw('CONCAT(borrowers.first_name, " ", borrowers.last_name) as borrower_name'),
+                    'borrowers.email as borrower_email',
+                    'borrowers.first_name as borrower_first_name',
+                    'borrowers.last_name as borrower_last_name'
+                );
+
+            // Filter by type/status
+            if ($request->has('type') && $request->type !== 'all') {
+                $type = $request->type;
+
+                switch ($type) {
+                    case 'upcoming':
+                        $query->where('payments.status', 'pending')
+                            ->where('payments.due_date', '>=', now());
+                        break;
+
+                    case 'overdue':
+                        $query->where(function ($q) {
+                            $q->whereIn('payments.status', ['late', 'missed'])
+                                ->orWhere(function ($subQ) {
+                                    $subQ->where('payments.status', 'pending')
+                                        ->where('payments.due_date', '<', now());
+                                });
+                        });
+                        break;
+
+                    case 'awaiting_verification':
+                        $query->where('payments.status', 'awaiting_verification');
+                        break;
+
+                    case 'rejected':
+                        $query->where('payments.status', 'rejected');
+                        break;
+
+                    case 'paid':
+                        $query->where('payments.status', 'paid');
+                        break;
+
+                    default:
+                        $query->where('payments.status', $type);
+                        break;
+                }
+            }
+
+            // Search functionality
+            if ($request->has('search') && !empty($request->search)) {
+                $search = $request->search;
+                $query->where(function ($q) use ($search) {
+                    $q->where('payments.transaction_id', 'like', "%{$search}%")
+                        ->orWhere('payments.loan_id', 'like', "%{$search}%")
+                        ->orWhere('borrowers.first_name', 'like', "%{$search}%")
+                        ->orWhere('borrowers.last_name', 'like', "%{$search}%")
+                        ->orWhereRaw("CONCAT(borrowers.first_name, ' ', borrowers.last_name) LIKE ?", ["%{$search}%"]);
+                });
+            }
+
+            // Sorting
+            $sortField = $request->input('sort_field', 'due_date');
+            $sortOrder = $request->input('sort_order', 'asc');
+
+            // Map frontend field names to database columns
+            $fieldMapping = [
+                'id' => 'payments.id',
+                'transaction_id' => 'payments.transaction_id',
+                'amount' => 'payments.amount',
+                'due_date' => 'payments.due_date',
+                'status' => 'payments.status',
+                'created_at' => 'payments.created_at',
+                'loan_id' => 'payments.loan_id',
+            ];
+
+            $dbSortField = $fieldMapping[$sortField] ?? 'payments.due_date';
+            $query->orderBy($dbSortField, $sortOrder);
+
+            // Get total count before pagination
+            $total = $query->count();
+
+            // Pagination
+            $perPage = (int) $request->input('per_page', 10);
+            $page = (int) $request->input('page', 1);
+            $offset = ($page - 1) * $perPage;
+
+            $payments = $query->offset($offset)->limit($perPage)->get();
+
+            // Transform the results to match expected structure
+            $transformedPayments = $payments->map(function ($payment) {
+                return [
+                    'id' => $payment->id,
+                    'loan_id' => $payment->loan_id,
+                    'transaction_id' => $payment->transaction_id,
+                    'amount' => $payment->amount,
+                    'principal_amount' => $payment->principal_amount ?? null,
+                    'interest_amount' => $payment->interest_amount ?? null,
+                    'due_date' => $payment->due_date,
+                    'payment_date' => $payment->payment_date,
+                    'paid_date' => $payment->paid_date,
+                    'status' => $payment->status,
+                    'payment_method' => $payment->payment_method,
+                    'proof_of_payment' => $payment->proof_of_payment,
+                    'verified_at' => $payment->verified_at,
+                    'verified_by' => $payment->verified_by,
+                    'rejection_reason' => $payment->rejection_reason,
+                    'notes' => $payment->notes,
+                    'late_fee' => $payment->late_fee ?? '0.00',
+                    'days_late' => $payment->days_late ?? 0,
+                    'created_at' => $payment->created_at,
+                    'updated_at' => $payment->updated_at,
+                    'loan' => [
+                        'id' => $payment->loan_id,
+                        'type' => $payment->loan_type,
+                        'principal_amount' => $payment->principal_amount,
+                        'approved_amount' => $payment->approved_amount,
+                        'interest_rate' => $payment->interest_rate,
+                        'status' => $payment->loan_status,
+                        'term_months' => $payment->term_months,
+                        'purpose' => $payment->purpose,
+                        'outstanding_balance' => $payment->outstanding_balance,
+                        'borrower' => [
+                            'name' => $payment->borrower_name,
+                            'first_name' => $payment->borrower_first_name,
+                            'last_name' => $payment->borrower_last_name,
+                            'email' => $payment->borrower_email,
+                        ]
+                    ]
+                ];
+            });
+
+            // Build pagination response
+            $response = [
+                'current_page' => $page,
+                'data' => $transformedPayments,
+                'first_page_url' => $request->url() . '?page=1',
+                'from' => $offset + 1,
+                'last_page' => (int) ceil($total / $perPage),
+                'last_page_url' => $request->url() . '?page=' . ceil($total / $perPage),
+                'links' => [],
+                'next_page_url' => $page < ceil($total / $perPage) ? $request->url() . '?page=' . ($page + 1) : null,
+                'path' => $request->url(),
+                'per_page' => $perPage,
+                'prev_page_url' => $page > 1 ? $request->url() . '?page=' . ($page - 1) : null,
+                'to' => min($offset + $perPage, $total),
+                'total' => $total,
+            ];
+
+            Log::info('Lender payments fetched successfully', [
+                'total' => $total,
+                'page' => $page,
+                'per_page' => $perPage
+            ]);
+
+            return response()->json($response);
+
+        } catch (\Exception $e) {
+            Log::error('Error fetching lender payments: ' . $e->getMessage());
+            Log::error('Stack trace: ' . $e->getTraceAsString());
+            return response()->json([
+                'message' => 'Failed to fetch payments',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get upcoming payments for lender (due in the future, not paid)
+     * GET /api/lender/payments/upcoming
+     */
+    public function upcomingForLender(Request $request)
+    {
+        $user = $request->user();
+
+        $query = Payment::with(['loan.borrower'])
+            ->whereHas('loan', function ($q) use ($user) {
+                $q->where('lender_id', $user->id);
+            })
+            ->where('status', 'pending')
+            ->where('due_date', '>=', now());
+
+        $perPage = $request->input('per_page', 10);
+        return response()->json($query->paginate($perPage));
+    }
+
+    /**
+     * Get overdue payments for lender
+     * GET /api/lender/payments/overdue
+     */
+    public function overdueForLender(Request $request)
+    {
+        $user = $request->user();
+
+        $query = Payment::with(['loan.borrower'])
+            ->whereHas('loan', function ($q) use ($user) {
+                $q->where('lender_id', $user->id);
+            })
+            ->where(function ($q) {
+                $q->whereIn('status', ['late', 'missed'])
+                    ->orWhere(function ($subQ) {
+                        $subQ->where('status', 'pending')
+                            ->where('due_date', '<', now());
+                    });
+            });
+
+        $perPage = $request->input('per_page', 10);
+        return response()->json($query->paginate($perPage));
+    }
+
+    /**
+     * Get payments awaiting verification
+     * GET /api/lender/payments/awaiting-verification
+     */
+    public function awaitingVerificationForLender(Request $request)
+    {
+        $user = $request->user();
+
+        $query = Payment::with(['loan.borrower'])
+            ->whereHas('loan', function ($q) use ($user) {
+                $q->where('lender_id', $user->id);
+            })
+            ->where('status', 'awaiting_verification');
+
+        $perPage = $request->input('per_page', 10);
+        return response()->json($query->paginate($perPage));
+    }
+
+    /**
+     * Get rejected payments
+     * GET /api/lender/payments/rejected
+     */
+    public function rejectedForLender(Request $request)
+    {
+        $user = $request->user();
+
+        $query = Payment::with(['loan.borrower'])
+            ->whereHas('loan', function ($q) use ($user) {
+                $q->where('lender_id', $user->id);
+            })
+            ->where('status', 'rejected');
+
+        $perPage = $request->input('per_page', 10);
+        return response()->json($query->paginate($perPage));
+    }
+
+    /**
+     * Get paid payments
+     * GET /api/lender/payments/paid
+     */
+    public function paidForLender(Request $request)
+    {
+        $user = $request->user();
+
+        $query = Payment::with(['loan.borrower'])
+            ->whereHas('loan', function ($q) use ($user) {
+                $q->where('lender_id', $user->id);
+            })
+            ->where('status', 'paid');
+
+        $perPage = $request->input('per_page', 10);
+        return response()->json($query->paginate($perPage));
+    }
+
+    /**
+     * Get payments for borrower
+     * GET /api/borrower/payments
+     */
+    public function indexForBorrower(Request $request)
+    {
+        try {
+            $user = $request->user();
+
+            Log::info('Fetching payments for borrower', ['borrower_id' => $user->id]);
+
+            // FIXED: Use direct JOIN approach - more reliable and performant
+            $query = DB::table('payments')
+                ->join('loans', 'payments.loan_id', '=', 'loans.id')
+                ->join('users as borrowers', 'loans.borrower_id', '=', 'borrowers.id')
+                ->where('loans.borrower_id', $user->id)
+                ->select(
+                    'payments.*',
+                    'loans.id as loan_id_full',
+                    'loans.type as loan_type',
+                    'loans.principal_amount',
+                    'loans.approved_amount',
+                    'loans.interest_rate',
+                    'loans.status as loan_status',
+                    'loans.term_months',
+                    'loans.purpose',
+                    'loans.outstanding_balance',
+                    DB::raw('CONCAT(borrowers.first_name, " ", borrowers.last_name) as borrower_name'),
+                    'borrowers.email as borrower_email',
+                    'borrowers.first_name as borrower_first_name',
+                    'borrowers.last_name as borrower_last_name'
+                );
+
+            // Filter by type/status
+            if ($request->has('type') && $request->type !== 'all') {
+                $type = $request->type;
+
+                switch ($type) {
+                    case 'upcoming':
+                        $query->where('payments.status', 'pending')
+                            ->where('payments.due_date', '>=', now());
+                        break;
+
+                    case 'overdue':
+                        $query->where(function ($q) {
+                            $q->whereIn('payments.status', ['late', 'missed'])
+                                ->orWhere(function ($subQ) {
+                                    $subQ->where('payments.status', 'pending')
+                                        ->where('payments.due_date', '<', now());
+                                });
+                        });
+                        break;
+
+                    case 'awaiting_verification':
+                        $query->where('payments.status', 'awaiting_verification');
+                        break;
+
+                    case 'rejected':
+                        $query->where('payments.status', 'rejected');
+                        break;
+
+                    case 'paid':
+                        $query->where('payments.status', 'paid');
+                        break;
+
+                    default:
+                        $query->where('payments.status', $type);
+                        break;
+                }
+            }
+
+            // Search functionality
+            if ($request->has('search') && !empty($request->search)) {
+                $search = $request->search;
+                $query->where(function ($q) use ($search) {
+                    $q->where('payments.transaction_id', 'like', "%{$search}%")
+                        ->orWhere('payments.loan_id', 'like', "%{$search}%")
+                        ->orWhere('borrowers.first_name', 'like', "%{$search}%")
+                        ->orWhere('borrowers.last_name', 'like', "%{$search}%")
+                        ->orWhereRaw("CONCAT(borrowers.first_name, ' ', borrowers.last_name) LIKE ?", ["%{$search}%"]);
+                });
+            }
+
+            // Sorting
+            $sortField = $request->input('sort_field', 'due_date');
+            $sortOrder = $request->input('sort_order', 'asc');
+
+            // Map frontend field names to database columns
+            $fieldMapping = [
+                'id' => 'payments.id',
+                'transaction_id' => 'payments.transaction_id',
+                'amount' => 'payments.amount',
+                'due_date' => 'payments.due_date',
+                'status' => 'payments.status',
+                'created_at' => 'payments.created_at',
+                'loan_id' => 'payments.loan_id',
+            ];
+
+            $dbSortField = $fieldMapping[$sortField] ?? 'payments.due_date';
+            $query->orderBy($dbSortField, $sortOrder);
+
+            // Get total count before pagination
+            $total = $query->count();
+
+            // Pagination
+            $perPage = (int) $request->input('per_page', 10);
+            $page = (int) $request->input('page', 1);
+            $offset = ($page - 1) * $perPage;
+
+            $payments = $query->offset($offset)->limit($perPage)->get();
+
+            // Transform the results to match expected structure
+            $transformedPayments = $payments->map(function ($payment) {
+                return [
+                    'id' => $payment->id,
+                    'loan_id' => $payment->loan_id,
+                    'transaction_id' => $payment->transaction_id,
+                    'amount' => $payment->amount,
+                    'principal_amount' => $payment->principal_amount ?? null,
+                    'interest_amount' => $payment->interest_amount ?? null,
+                    'due_date' => $payment->due_date,
+                    'payment_date' => $payment->payment_date,
+                    'paid_date' => $payment->paid_date,
+                    'status' => $payment->status,
+                    'payment_method' => $payment->payment_method,
+                    'proof_of_payment' => $payment->proof_of_payment,
+                    'verified_at' => $payment->verified_at,
+                    'verified_by' => $payment->verified_by,
+                    'rejection_reason' => $payment->rejection_reason,
+                    'notes' => $payment->notes,
+                    'late_fee' => $payment->late_fee ?? '0.00',
+                    'days_late' => $payment->days_late ?? 0,
+                    'created_at' => $payment->created_at,
+                    'updated_at' => $payment->updated_at,
+                    'loan' => [
+                        'id' => $payment->loan_id,
+                        'type' => $payment->loan_type,
+                        'principal_amount' => $payment->principal_amount,
+                        'approved_amount' => $payment->approved_amount,
+                        'interest_rate' => $payment->interest_rate,
+                        'status' => $payment->loan_status,
+                        'term_months' => $payment->term_months,
+                        'purpose' => $payment->purpose,
+                        'outstanding_balance' => $payment->outstanding_balance,
+                        'borrower' => [
+                            'name' => $payment->borrower_name,
+                            'first_name' => $payment->borrower_first_name,
+                            'last_name' => $payment->borrower_last_name,
+                            'email' => $payment->borrower_email,
+                        ]
+                    ]
+                ];
+            });
+
+            // Build pagination response
+            $response = [
+                'current_page' => $page,
+                'data' => $transformedPayments,
+                'first_page_url' => $request->url() . '?page=1',
+                'from' => $offset + 1,
+                'last_page' => (int) ceil($total / $perPage),
+                'last_page_url' => $request->url() . '?page=' . ceil($total / $perPage),
+                'links' => [],
+                'next_page_url' => $page < ceil($total / $perPage) ? $request->url() . '?page=' . ($page + 1) : null,
+                'path' => $request->url(),
+                'per_page' => $perPage,
+                'prev_page_url' => $page > 1 ? $request->url() . '?page=' . ($page - 1) : null,
+                'to' => min($offset + $perPage, $total),
+                'total' => $total,
+            ];
+
+            Log::info('Lender payments fetched successfully', [
+                'total' => $total,
+                'page' => $page,
+                'per_page' => $perPage
+            ]);
+
+            return response()->json($response);
+
+        } catch (\Exception $e) {
+            Log::error('Error fetching lender payments: ' . $e->getMessage());
+            Log::error('Stack trace: ' . $e->getTraceAsString());
+            return response()->json([
+                'message' => 'Failed to fetch payments',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Verify a payment (approve or reject)
+     * POST /api/payments/{payment}/verify
+     */
+    public function verify(Request $request, Payment $payment)
+    {
+        $request->validate([
+            'action' => 'required|in:approve,reject',
+            'reason' => 'required_if:action,reject|string|max:500',
+        ]);
+
+        $user = $request->user();
+
+        // Check if the payment belongs to a loan managed by this lender
+        if ($payment->loan->lender_id !== $user->id) {
+            return response()->json([
+                'message' => 'Unauthorized to verify this payment'
+            ], 403);
+        }
+
+        if ($request->action === 'approve') {
+            $payment->update([
+                'status' => 'paid',
+                'verified_at' => now(),
+                'paid_date' => now(),
+            ]);
+
+            // Update loan outstanding balance
+            $loan = $payment->loan;
+            $newBalance = floatval($loan->outstanding_balance) - floatval($payment->amount);
+            $loan->outstanding_balance = max(0, $newBalance); // Don't go negative
+            $loan->save();
+
+            return response()->json([
+                'message' => 'Payment approved successfully',
+                'payment' => $payment->fresh(['loan.borrower']),
+            ]);
+        } else {
+            $payment->update([
+                'status' => 'rejected',
+                'rejection_reason' => $request->reason,
+                'verified_at' => now(),
+            ]);
+
+            return response()->json([
+                'message' => 'Payment rejected',
+                'payment' => $payment->fresh(['loan.borrower']),
+            ]);
+        }
+    }
+
+    /**
+     * Download payment proof
+     * GET /api/payments/{payment}/proof/download
+     */
+    public function downloadProof(Request $request, Payment $payment)
+    {
+        $user = $request->user();
+
+        // Check authorization - either lender or borrower
+        $isLender = $payment->loan->lender_id === $user->id;
+        $isBorrower = $payment->loan->borrower_id === $user->id;
+
+        if (!$isLender && !$isBorrower) {
+            return response()->json([
+                'message' => 'Unauthorized to access this payment proof'
+            ], 403);
+        }
+
+        if (!$payment->proof_of_payment) {
+            return response()->json([
+                'message' => 'No proof of payment available'
+            ], 404);
+        }
+
+        $filePath = $payment->proof_of_payment;
+
+        // Check if file exists
+        if (!Storage::disk('public')->exists($filePath)) {
+            return response()->json([
+                'message' => 'File not found'
+            ], 404);
+        }
+
+        return Storage::disk('public')->download($filePath);
+    }
+
+    // ========================================
+    // EXISTING METHODS (KEPT AS IS)
+    // ========================================
 
     /**
      * Get all payments for a loan
@@ -49,39 +622,171 @@ class PaymentController extends Controller
     /**
      * Record a payment (for a specific loan)
      */
-    public function store(Request $request, Loan $loan)
+    public function store(Request $request, Loan $loan = null)
     {
-        $this->authorize('pay', $loan);
+        // SCENARIO 1: Admin/Staff making payment for a loan (existing logic)
+        if ($loan) {
+            $this->authorize('pay', $loan);
 
-        $validated = $request->validate([
-            'payment_method' => 'required|in:credit_card,debit_card,bank_transfer,check',
-            'transaction_id' => 'sometimes|string|max:100',
-        ]);
+            $validated = $request->validate([
+                'payment_method' => 'required|in:credit_card,debit_card,bank_transfer,check,ewallet',
+                'transaction_id' => 'sometimes|string|max:100',
+            ]);
 
-        // Find the next pending payment
-        $payment = $loan->payments()
-            ->where('status', 'pending')
-            ->orderBy('due_date')
-            ->first();
+            // Find the next pending payment
+            $payment = $loan->payments()
+                ->where('status', 'pending')
+                ->orderBy('due_date')
+                ->first();
 
-        if (!$payment) {
+            if (!$payment) {
+                return response()->json([
+                    'message' => 'No pending payments for this loan',
+                ], 422);
+            }
+
+            // Record the payment
+            $payment = $this->loanService->recordPayment(
+                $payment,
+                $validated['payment_method'],
+                $validated['transaction_id'] ?? null
+            );
+
             return response()->json([
-                'message' => 'No pending payments for this loan',
-            ], 422);
+                'message' => 'Payment recorded successfully',
+                'payment' => $payment->load('loan'),
+                'loan' => $payment->loan,
+            ]);
         }
 
-        // Record the payment
-        $payment = $this->loanService->recordPayment(
-            $payment,
-            $validated['payment_method'],
-            $validated['transaction_id'] ?? null
-        );
+        // SCENARIO 2 & 3: Borrower submitting payment
+        // Check if this is from payment history (has payment_number or notes indicating scheduled payment)
+        $isScheduledPayment = $request->has('notes') &&
+            str_contains($request->notes ?? '', 'Payment ');
 
-        return response()->json([
-            'message' => 'Payment recorded successfully',
-            'payment' => $payment->load('loan'),
-            'loan' => $payment->loan,
-        ]);
+        // Validate based on scenario
+        if ($isScheduledPayment) {
+            // Payment History - allow image to be optional
+            $request->validate([
+                'loan_id' => 'required|exists:loans,id',
+                'amount' => 'required|numeric|min:0',
+                'payment_method' => 'required|string|in:ewallet,bank_transfer,credit_card,debit_card,cash',
+                'payment_date' => 'required|date',
+                'proof_of_payment' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:10240', // 10MB
+                'notes' => 'nullable|string|max:500',
+                'payment_number' => 'nullable|integer',
+                'payment_details' => 'nullable|json',
+            ]);
+        } else {
+            // Regular borrower payment - require proof
+            $request->validate([
+                'loan_id' => 'required|exists:loans,id',
+                'amount' => 'required|numeric|min:0',
+                'payment_method' => 'required|string',
+                'payment_date' => 'required|date',
+                'proof_of_payment' => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
+                'notes' => 'nullable|string|max:500',
+            ]);
+        }
+
+        $user = $request->user();
+
+        // Verify the loan belongs to this borrower
+        $loan = Loan::findOrFail($request->loan_id);
+        if ($loan->borrower_id !== $user->id) {
+            return response()->json([
+                'message' => 'Unauthorized to submit payment for this loan'
+            ], 403);
+        }
+
+        // Verify loan is active
+        if (!in_array($loan->status, ['active', 'approved', 'disbursed'])) {
+            return response()->json([
+                'message' => 'Cannot make payment for inactive loan'
+            ], 400);
+        }
+
+        // Store proof of payment
+        $proofPath = null;
+        if ($request->hasFile('proof_of_payment')) {
+            $proofPath = $request->file('proof_of_payment')
+                ->store('payment-proofs', 'public');
+        }
+
+        // Parse payment details if provided
+        $paymentDetails = null;
+        if ($request->has('payment_details')) {
+            $paymentDetails = is_string($request->payment_details)
+                ? json_decode($request->payment_details, true)
+                : $request->payment_details;
+        }
+
+        // Determine status based on payment method and proof
+        $status = 'awaiting_verification';
+        if ($proofPath || $request->payment_method === 'credit_card') {
+            // If proof is provided or credit card (instant), mark as pending verification
+            $status = 'awaiting_verification';
+        }
+
+        DB::beginTransaction();
+
+        try {
+            // Create payment record
+            $payment = Payment::create([
+                'loan_id' => $request->loan_id,
+                'amount' => $request->amount,
+                'payment_method' => $request->payment_method,
+                'payment_date' => $request->payment_date,
+                'payment_number' => $request->payment_number ?? null,
+                'proof_of_payment' => $proofPath,
+                'notes' => $request->notes,
+                'payment_details' => $paymentDetails,
+                'status' => $status,
+                'transaction_id' => 'TXN-' . strtoupper(uniqid()),
+                'due_date' => $request->due_date ?? now(),
+            ]);
+
+            // Optional: Auto-approve for certain payment methods or if admin setting is enabled
+            $autoApprove = config('payments.auto_approve', false);
+            if ($autoApprove && $proofPath) {
+                $payment->status = 'completed';
+                $payment->verified_at = now();
+                $payment->verified_by = $user->id;
+                $payment->save();
+
+                // Update loan balance
+                $loan->outstanding_balance = max(0, $loan->outstanding_balance - $payment->amount);
+
+                // Check if loan is fully paid
+                if ($loan->outstanding_balance <= 0) {
+                    $loan->status = 'completed';
+                    $loan->completed_at = now();
+                }
+
+                $loan->save();
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Payment submitted successfully',
+                'payment' => $payment->load('loan'),
+                'loan' => $loan->fresh(),
+                'status' => $payment->status,
+            ], 201);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            // Delete uploaded file if transaction failed
+            if ($proofPath) {
+                Storage::disk('public')->delete($proofPath);
+            }
+
+            return response()->json([
+                'message' => 'Failed to process payment: ' . $e->getMessage()
+            ], 500);
+        }
     }
 
     /**
@@ -91,7 +796,7 @@ class PaymentController extends Controller
     {
         try {
             $user = auth()->user();
-            
+
             if (!$user) {
                 return response()->json([
                     'message' => 'Unauthenticated',
@@ -138,7 +843,7 @@ class PaymentController extends Controller
             try {
                 // Get available columns in payments table
                 $paymentColumns = Schema::getColumnListing('payments');
-                
+
                 // Build payment data based on available columns
                 $paymentData = [
                     'loan_id' => $loan->id,
@@ -152,11 +857,11 @@ class PaymentController extends Controller
                 if (in_array('payment_date', $paymentColumns)) {
                     $paymentData['payment_date'] = now();
                 }
-                
+
                 if (in_array('transaction_id', $paymentColumns)) {
                     $paymentData['transaction_id'] = 'TXN-' . strtoupper(uniqid());
                 }
-                
+
                 if (in_array('reference_number', $paymentColumns)) {
                     $paymentData['reference_number'] = 'REF-' . strtoupper(uniqid());
                 }
@@ -167,10 +872,10 @@ class PaymentController extends Controller
                 // Update loan balance
                 $currentBalance = floatval($loan->outstanding_balance ?? $loan->amount);
                 $newBalance = max(0, $currentBalance - floatval($validated['amount']));
-                
+
                 // Get available columns in loans table
                 $loanColumns = Schema::getColumnListing('loans');
-                
+
                 if (in_array('outstanding_balance', $loanColumns)) {
                     $loan->outstanding_balance = $newBalance;
                 }
@@ -233,14 +938,14 @@ class PaymentController extends Controller
     {
         try {
             $user = auth()->user();
-            
+
             if (!$user) {
                 return response()->json([
                     'message' => 'Unauthenticated',
                 ], 401);
             }
 
-            $days = (int)$request->input('days', 30);
+            $days = (int) $request->input('days', 30);
 
             Log::info('Fetching upcoming payments', [
                 'user_id' => $user->id,
@@ -250,17 +955,17 @@ class PaymentController extends Controller
             // Check if the method exists
             if (!method_exists($this->loanService, 'getUpcomingPayments')) {
                 Log::error('Method getUpcomingPayments does not exist on LoanService');
-                
+
                 // Fallback: Query directly
                 $payments = Payment::whereHas('loan', function ($query) use ($user) {
                     $query->where('borrower_id', $user->id);
                 })
-                ->where('status', 'pending')
-                ->where('due_date', '>=', now())
-                ->where('due_date', '<=', now()->addDays($days))
-                ->with('loan')
-                ->orderBy('due_date')
-                ->paginate(15);
+                    ->where('status', 'pending')
+                    ->where('due_date', '>=', now())
+                    ->where('due_date', '<=', now()->addDays($days))
+                    ->with('loan')
+                    ->orderBy('due_date')
+                    ->paginate(15);
 
                 return response()->json([
                     'payments' => $payments,
@@ -292,7 +997,7 @@ class PaymentController extends Controller
     {
         try {
             $user = auth()->user();
-            
+
             if (!$user) {
                 return response()->json([
                     'message' => 'Unauthenticated',
@@ -306,16 +1011,16 @@ class PaymentController extends Controller
             // Check if the method exists
             if (!method_exists($this->loanService, 'getOverduePayments')) {
                 Log::error('Method getOverduePayments does not exist on LoanService');
-                
+
                 // Fallback: Query directly
                 $payments = Payment::whereHas('loan', function ($query) use ($user) {
                     $query->where('borrower_id', $user->id);
                 })
-                ->where('status', 'pending')
-                ->where('due_date', '<', now())
-                ->with('loan')
-                ->orderBy('due_date')
-                ->paginate(15);
+                    ->where('status', 'pending')
+                    ->where('due_date', '<', now())
+                    ->with('loan')
+                    ->orderBy('due_date')
+                    ->paginate(15);
 
                 return response()->json([
                     'payments' => $payments,

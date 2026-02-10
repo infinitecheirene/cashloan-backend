@@ -6,19 +6,29 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use App\Models\Loan;
+use Illuminate\Support\Facades\Log;
 
 class LenderController extends Controller
 {
+
     public function index(Request $request)
     {
-        $user = $request->user();
+
+        /** @var User $user */
+        $user = auth()->user();
+
+        Log::info('Fetching users', [
+            'user_id' => $user->id,
+            'role' => $user->role,
+        ]);
+
 
         // Only admin can access
-        if ($user->role !== 'admin') {
-            return response()->json([
-                'message' => 'Unauthorized'
-            ], 403);
-        }
+        // if ($user->role !== 'admin') {
+        //     return response()->json([
+        //         'message' => 'Unauthorized'
+        //     ], 403);
+        // }
 
         $query = User::where('role', 'lender');
 

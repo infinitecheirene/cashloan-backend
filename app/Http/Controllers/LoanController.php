@@ -22,6 +22,171 @@ class LoanController extends Controller
     }
 
     /**
+     * Get all loans for authenticated user
+     * FIXED: Return loans as array instead of paginated object
+     */
+    public function index(Request $request)
+    {
+        try {
+            $perPage = $request->input('per_page', 10);
+            $search = $request->input('search', '');
+            $status = $request->input('status', 'all');
+            $sortBy = $request->input('sort_by', 'created_at');
+            $sortOrder = $request->input('sort_order', 'desc');
+
+            /** @var User $user */
+            $user = auth()->user();
+
+            Log::info('Fetching loans for user', [
+                'user_id' => $user->id,
+                'role' => $user->role,
+            ]);
+
+            $query = null;
+
+            if ($user->isAdmin()) {
+                $query = Loan::with(['borrower', 'lender', 'loanOfficer', 'documents']);
+
+                if ($search) {
+                    $query->where(function ($q) use ($search) {
+                        if (is_numeric($search)) {
+                            $q->where('id', $search);
+                        } else {
+                            $q->where('type', 'like', "%{$search}%")
+                                ->orWhere('status', 'like', "%{$search}%")
+                                ->orWhereHas('borrower', function ($q2) use ($search) {
+                                    $q2->where('first_name', 'like', "%{$search}%")
+                                        ->orWhere('last_name', 'like', "%{$search}%")
+                                        ->orWhere('email', 'like', "%{$search}%");
+                                })
+                                ->orWhereHas('lender', function ($q2) use ($search) {
+                                    $q2->where('first_name', 'like', "%{$search}%")
+                                        ->orWhere('last_name', 'like', "%{$search}%");
+                                });
+                        }
+                    });
+                }
+
+                if ($status && $status !== 'all') {
+                    $query->where('status', $status);
+                }
+
+                $allowedSortFields = ['id', 'type', 'principal_amount', 'status', 'created_at'];
+                if (in_array($sortBy, $allowedSortFields)) {
+                    $query->orderBy($sortBy, $sortOrder);
+                } else {
+                    $query->orderBy('created_at', $sortOrder);
+                }
+
+            } elseif ($user->isLender()) {
+                $query = Loan::with(['borrower', 'lender', 'loanOfficer', 'documents'])
+                    ->where(function ($q) use ($user) {
+                        $q->whereIn('status', ['pending', 'approved'])
+                            ->whereNotNull('lender_id')
+                            ->orWhere(function ($q2) use ($user) {
+                                $q2->where('lender_id', $user->id)
+                                    ->whereIn('status', ['active', 'completed']);
+                            });
+                    });
+
+                if ($search) {
+                    $query->where(function ($q) use ($search) {
+                        if (is_numeric($search)) {
+                            $q->where('id', $search);
+                        } else {
+                            $q->where('type', 'like', "%{$search}%")
+                                ->orWhere('status', 'like', "%{$search}%")
+                                ->orWhereHas('borrower', function ($q2) use ($search) {
+                                    $q2->where('first_name', 'like', "%{$search}%")
+                                        ->orWhere('last_name', 'like', "%{$search}%")
+                                        ->orWhere('email', 'like', "%{$search}%");
+                                })
+                                ->orWhereHas('lender', function ($q2) use ($search) {
+                                    $q2->where('first_name', 'like', "%{$search}%")
+                                        ->orWhere('last_name', 'like', "%{$search}%");
+                                });
+                        }
+                    });
+                }
+
+                if ($status && $status !== 'all') {
+                    $query->where('status', $status);
+                }
+
+            } elseif ($user->isLoanOfficer()) {
+                $query = Loan::where('loan_officer_id', $user->id)
+                    ->with(['borrower', 'lender', 'loanOfficer', 'documents']);
+
+                if ($search) {
+                    $query->where(function ($q) use ($search) {
+                        if (is_numeric($search)) {
+                            $q->where('id', $search);
+                        } else {
+                            $q->whereHas('borrower', function ($q2) use ($search) {
+                                $q2->where('first_name', 'like', "%{$search}%")
+                                    ->orWhere('last_name', 'like', "%{$search}%");
+                            });
+                        }
+                    });
+                }
+
+                if ($status && $status !== 'all') {
+                    $query->where('status', $status);
+                }
+
+            } else {
+                // Borrower
+                $query = Loan::where('borrower_id', $user->id)
+                    ->with(['borrower', 'lender', 'loanOfficer', 'documents']);
+
+                if ($search && is_numeric($search)) {
+                    $query->where('id', $search);
+                }
+
+                if ($status && $status !== 'all') {
+                    $query->where('status', $status);
+                }
+            }
+
+            // Paginate
+            $loans = $query->paginate($perPage);
+
+            Log::info('Loans fetched successfully', [
+                'count' => $loans->count(),
+                'total' => $loans->total(),
+                'user_id' => $user->id,
+            ]);
+
+            return response()->json([
+                'data' => $loans->items(),
+                'current_page' => $loans->currentPage(),
+                'last_page' => $loans->lastPage(),
+                'per_page' => $loans->perPage(),
+                'total' => $loans->total(),
+                'from' => $loans->firstItem() ?? 0,
+                'to' => $loans->lastItem() ?? 0,
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error fetching loans', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'data' => [],
+                'current_page' => 1,
+                'last_page' => 1,
+                'per_page' => $perPage ?? 10,
+                'total' => 0,
+                'from' => 0,
+                'to' => 0,
+            ], 200);
+        }
+    }
+
+    /**
      * Create a new loan application
      */
     public function store(StoreLoanRequest $request)
@@ -58,12 +223,12 @@ class LoanController extends Controller
 
                         // Generate unique filename
                         $filename = Str::slug(pathinfo($originalName, PATHINFO_FILENAME))
-                            . '_' . time()
-                            . '_' . Str::random(8)
+                            . '_' . date('Y-m-d_H-i-s')
+                            . '_' . $loan->id
                             . '.' . $extension;
 
-                        // Move file to public path
-                        $destinationPath = public_path('documents/loans/' . $loan->id);
+                        // Create folder structure: documents/loans/{loan_id}/{document_type}
+                        $destinationPath = public_path('documents/loans/' . $loan->id . '/' . $documentType);
 
                         // Create directory if it doesn't exist
                         if (!file_exists($destinationPath)) {
@@ -73,10 +238,10 @@ class LoanController extends Controller
                         // Move the file
                         $file->move($destinationPath, $filename);
 
-                        // Store relative path for database
-                        $filePath = 'documents/loans/' . $loan->id . '/' . $filename;
+                        // Store relative path for database (this is what will be used in frontend)
+                        $filePath = '/documents/loans/' . $loan->id . '/' . $documentType . '/' . $filename;
 
-                        // Create document record using the information we saved BEFORE moving
+                        // Create document record
                         LoanDocument::create([
                             'loan_id' => $loan->id,
                             'document_type' => $documentType,
@@ -91,6 +256,7 @@ class LoanController extends Controller
                             'loan_id' => $loan->id,
                             'document_type' => $documentType,
                             'filename' => $filename,
+                            'path' => $filePath,
                             'size' => $fileSize,
                         ]);
                     }
@@ -122,73 +288,6 @@ class LoanController extends Controller
         }
     }
 
-    /**
-     * Get all loans for authenticated user
-     * FIXED: Return loans as array instead of paginated object
-     */
-    public function index(Request $request)
-    {
-        try {
-            /** @var User $user */
-            $user = auth()->user();
-
-            Log::info('Fetching loans for user', [
-                'user_id' => $user->id,
-                'role' => $user->role,
-            ]);
-
-            $query = null;
-
-            if ($user->isAdmin()) {
-                $query = Loan::with(['borrower', 'lender', 'loanOfficer', 'documents']);
-            } elseif ($user->isLender()) {
-                // Lender sees:
-                // 1. All pending or approved loans (unassigned)
-                // 2. Only their own active loans
-                $query = Loan::with(['borrower', 'lender', 'loanOfficer', 'documents'])
-                    ->where(function ($q) use ($user) {
-                        $q->whereIn('status', ['pending', 'approved'])
-                            ->whereNull('lender_id') // only unassigned loans
-                            ->orWhere(function ($q2) use ($user) {
-                                $q2->where('lender_id', $user->id)
-                                    ->where('status', 'active');
-                            });
-                    });
-            } elseif ($user->isLoanOfficer()) {
-                $query = Loan::where('loan_officer_id', $user->id)
-                    ->with(['borrower', 'lender', 'documents']);
-            } else {
-                // Borrower - show only their loans
-                $query = Loan::where('borrower_id', $user->id)
-                    ->with(['lender', 'loanOfficer', 'documents']);
-            }
-
-            // Get all loans without pagination for simplicity
-            $loans = $query->orderBy('created_at', 'desc')->get();
-
-            Log::info('Loans fetched successfully', [
-                'count' => $loans->count(),
-                'user_id' => $user->id,
-            ]);
-
-            return response()->json([
-                'loans' => $loans,
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Error fetching loans', [
-                'user_id' => auth()->id(),
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-
-            return response()->json([
-                'message' => 'Failed to fetch loans',
-                'error' => config('app.debug') ? $e->getMessage() : 'An error occurred',
-                'loans' => [], // Return empty array so frontend doesn't break
-            ], 500);
-        }
-    }
 
     /**
      * Get single loan details
@@ -262,12 +361,10 @@ class LoanController extends Controller
             'approved_amount' => 'required|numeric|min:0',
             'interest_rate' => 'sometimes|numeric|min:0|max:100',
             'lender_id' => 'sometimes|exists:users,id',
+            'notes' => 'sometimes|string|nullable',
         ]);
 
-        /** @var User $user */
         $user = auth()->user();
-
-        // Use the lender_id from the request if provided, otherwise fallback to the authenticated user
         $lenderId = $validated['lender_id'] ?? $user->id;
 
         $loan = $this->loanService->approveLoan(
@@ -278,9 +375,14 @@ class LoanController extends Controller
             interestRate: isset($validated['interest_rate']) ? (float) $validated['interest_rate'] : null,
         );
 
+        if (isset($validated['notes'])) {
+            $loan->notes = $validated['notes'];
+            $loan->save();
+        }
+
         return response()->json([
             'message' => 'Loan approved successfully',
-            'loan' => $loan->load(['borrower', 'lender', 'loanOfficer']),
+            'loan' => $loan->fresh()->load(['borrower', 'lender', 'loanOfficer']),
         ]);
     }
 
@@ -292,7 +394,7 @@ class LoanController extends Controller
         $this->authorize('reject', $loan);
 
         $validated = $request->validate([
-            'reason' => 'required|string|max:500',
+            'reason' => 'nullable|string|max:500',
         ]);
 
         $loan = $this->loanService->rejectLoan($loan, $validated['reason']);
@@ -324,7 +426,7 @@ class LoanController extends Controller
 
         $loan->status = 'active';
         $loan->start_date = $request->input('start_date');
-        $loan->first_payment_date = $request->input('first_payment_date');
+        $loan->disbursement_date = $request->input('first_payment_date');
         $loan->notes = $request->input('notes', $loan->notes);
 
         // Assign lender_id only if the user is a lender
@@ -353,6 +455,36 @@ class LoanController extends Controller
     }
 
     /**
+     * List documents for a loan
+     */
+    public function indexDocument(Loan $loan)
+    {
+        $user = auth()->user();
+
+        Log::info('Document authorization check', [
+            'loan_id' => $loan->id,
+            'loan_borrower_id' => $loan->borrower_id,
+            'loan_lender_id' => $loan->lender_id,
+            'auth_user_id' => $user->id,
+            'auth_user_role' => $user->role,
+            'is_admin' => $user->isAdmin(),
+            'is_borrower' => $user->isBorrower(),
+            'is_lender' => $user->isLender(),
+        ]);
+
+        // This will throw an exception with details if it fails
+        $this->authorize('viewDocuments', $loan);
+
+        $documents = LoanDocument::where('loan_id', $loan->id)->get();
+
+        return response()->json([
+            'success' => true,
+            'documents' => $documents,
+            'count' => $documents->count()
+        ]);
+    }
+
+    /**
      * Download loan document
      */
     public function downloadDocument(Loan $loan, LoanDocument $document)
@@ -372,14 +504,242 @@ class LoanController extends Controller
         return response()->download($filePath, $document->file_name);
     }
 
-    public function getBorrowerLoans($borrowerId)
+    public function getWalletInfo(Request $request, $loanId)
     {
-        // Fetch loans for the borrower
-        $loans = Loan::where('borrower_id', $borrowerId)->get();
+        try {
+            $loan = Loan::with(['lender', 'borrower'])->findOrFail($loanId);
+            $user = $request->user();
 
-        return response()->json([
-            'loans' => $loans,
-        ]);
+            // DEBUG: Log all the values
+            Log::info('Wallet Info Authorization Debug', [
+                'loan_id' => $loanId,
+                'current_user_id' => $user->id,
+                'user_role' => $user->role,
+                'loan_borrower_id' => $loan->borrower_id,
+                'loan_lender_id' => $loan->lender_id,
+                'loan_status' => $loan->status,
+            ]);
+
+            // CHANGED: Check user role instead of specific loan relationship
+            $canView = $user->isAdmin() || $user->isBorrower() || $user->isLender();
+
+            // DEBUG: Log the check results
+            Log::info('Authorization Check Results', [
+                'user_role' => $user->role,
+                'is_admin' => $user->isAdmin(),
+                'is_borrower' => $user->isBorrower(),
+                'is_lender' => $user->isLender(),
+                'can_view' => $canView,
+            ]);
+
+            // Allow any user with borrower, lender, or admin role to view wallet info
+            if (!$canView) {
+                Log::warning('Unauthorized wallet access attempt', [
+                    'user_id' => $user->id,
+                    'user_role' => $user->role,
+                    'loan_id' => $loanId,
+                    'reason' => 'User role is not borrower, lender, or admin',
+                ]);
+
+                return response()->json([
+                    'message' => 'Unauthorized to view this wallet information',
+                    'debug' => config('app.debug') ? [
+                        'your_user_id' => $user->id,
+                        'your_role' => $user->role,
+                    ] : null
+                ], 403);
+            }
+
+            // Check if wallet information exists
+            if (!$loan->receiver_wallet_name && !$loan->receiver_wallet_number) {
+                return response()->json([
+                    'message' => 'Wallet information has not been added yet by the lender',
+                    'has_wallet_info' => false
+                ], 404);
+            }
+
+            // Build wallet data response
+            $walletData = [
+                'wallet_name' => $loan->receiver_wallet_name,
+                'wallet_number' => $loan->receiver_wallet_number,
+                'wallet_email' => $loan->receiver_wallet_email,
+                'wallet_proof_url' => $loan->receiver_wallet_proof ?? null,
+                'has_wallet_info' => true,
+            ];
+
+            // Include lender info if available
+            if ($loan->lender) {
+                $walletData['lender'] = [
+                    'id' => $loan->lender->id,
+                    'name' => $loan->lender->first_name . ' ' . $loan->lender->last_name,
+                    'email' => $loan->lender->email,
+                ];
+            }
+
+            // Include borrower info for lender/admin
+            if ($user->isLender() || $user->isAdmin()) {
+                if ($loan->borrower) {
+                    $walletData['borrower'] = [
+                        'id' => $loan->borrower->id,
+                        'name' => $loan->borrower->first_name . ' ' . $loan->borrower->last_name,
+                        'email' => $loan->borrower->email,
+                    ];
+                }
+            }
+
+            Log::info('Wallet info retrieved successfully', [
+                'user_id' => $user->id,
+                'user_role' => $user->role,
+                'loan_id' => $loanId,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'wallet' => $walletData,
+                'loan_status' => $loan->status,
+            ]);
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'message' => 'Loan not found'
+            ], 404);
+        } catch (\Exception $e) {
+            Log::error('Failed to retrieve wallet information', [
+                'loan_id' => $loanId,
+                'user_id' => $request->user()->id ?? null,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to retrieve wallet information',
+                'error' => config('app.debug') ? $e->getMessage() : 'An error occurred'
+            ], 500);
+        }
     }
 
+    public function updateWalletInfo(Request $request, $loanId)
+    {
+        try {
+            $loan = Loan::findOrFail($loanId);
+
+            // Only lender or admin can update wallet info
+            if ($request->user()->id !== $loan->lender_id && !$request->user()->is_admin) {
+                return response()->json([
+                    'message' => 'Unauthorized to update wallet information'
+                ], 403);
+            }
+
+            // Log incoming request for debugging
+            Log::info('Wallet update request received', [
+                'loan_id' => $loanId,
+                'has_file' => $request->hasFile('receiver_wallet_proof'),
+                'all_data' => $request->except(['receiver_wallet_proof']),
+            ]);
+
+            // Validate the request - changed 'image' to 'file' for better compatibility
+            $validated = $request->validate([
+                'receiver_wallet_name' => 'required|string|max:255',
+                'receiver_wallet_number' => 'required|string|max:100',
+                'receiver_wallet_email' => 'nullable|email|max:255',
+                'receiver_wallet_proof' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
+            ]);
+
+            // Handle file upload
+            if ($request->hasFile('receiver_wallet_proof')) {
+                $file = $request->file('receiver_wallet_proof');
+
+                if ($file->isValid()) {
+                    // Delete old proof if exists
+                    if ($loan->receiver_wallet_proof) {
+                        $oldFilePath = public_path($loan->receiver_wallet_proof);
+                        if (file_exists($oldFilePath)) {
+                            unlink($oldFilePath);
+                            Log::info('Old wallet proof deleted', [
+                                'loan_id' => $loan->id,
+                                'old_path' => $loan->receiver_wallet_proof
+                            ]);
+                        }
+                    }
+
+                    // Get file information BEFORE moving
+                    $originalName = $file->getClientOriginalName();
+                    $extension = $file->getClientOriginalExtension();
+                    $fileSize = $file->getSize();
+                    $mimeType = $file->getMimeType();
+
+                    // Generate unique filename
+                    $filename = Str::slug(pathinfo($originalName, PATHINFO_FILENAME))
+                        . '_' . date('Y-m-d_H-i-s')
+                        . '_' . $loan->id
+                        . '.' . $extension;
+
+                    // Create folder structure: documents/loans/{loan_id}/wallet-proofs
+                    $destinationPath = public_path('documents/loans/' . $loan->id . '/wallet-proofs');
+
+                    // Create directory if it doesn't exist
+                    if (!file_exists($destinationPath)) {
+                        mkdir($destinationPath, 0755, true);
+                    }
+
+                    // Move the file
+                    $file->move($destinationPath, $filename);
+
+                    // Store relative path for database (this is what will be used in frontend)
+                    $filePath = '/documents/loans/' . $loan->id . '/wallet-proofs/' . $filename;
+
+                    $validated['receiver_wallet_proof'] = $filePath;
+
+                    Log::info('Wallet proof uploaded successfully', [
+                        'loan_id' => $loan->id,
+                        'filename' => $filename,
+                        'path' => $filePath,
+                        'size' => $fileSize,
+                        'original_name' => $originalName,
+                    ]);
+                } else {
+                    Log::warning('Invalid file upload', [
+                        'loan_id' => $loan->id,
+                        'error' => $file->getErrorMessage()
+                    ]);
+                }
+            }
+
+            // Update only the validated fields
+            $loan->update($validated);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Wallet information updated successfully',
+                'wallet' => [
+                    'wallet_name' => $loan->receiver_wallet_name,
+                    'wallet_number' => $loan->receiver_wallet_number,
+                    'wallet_email' => $loan->receiver_wallet_email,
+                    'wallet_proof_url' => $loan->receiver_wallet_proof ?? null,
+                ]
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            Log::error('Validation failed', [
+                'loan_id' => $loanId,
+                'errors' => $e->errors(),
+                'input' => $request->except(['receiver_wallet_proof'])
+            ]);
+
+            return response()->json([
+                'message' => 'Validation failed',
+                'errors' => $e->errors()
+            ], 422);
+        } catch (\Exception $e) {
+            Log::error('Failed to update wallet information', [
+                'loan_id' => $loanId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to update wallet information',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
 }

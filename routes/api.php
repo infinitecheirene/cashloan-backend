@@ -1,106 +1,130 @@
 <?php
 
+namespace App\Http\Controllers;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BorrowerController;
 use App\Http\Controllers\LenderController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\LoanOfficerController;
 use App\Http\Controllers\PaymentController;
+use App\Http\Controllers\UserController;
+use App\Http\Controllers\SettingsController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// Health check
-Route::get('/health', fn() => response()->json(['status' => 'OK']));
-
-// ------------------
-// Public Auth Routes
-// ------------------
-Route::prefix('auth')->group(function () {
-    Route::post('register', [AuthController::class, 'register']);
-    Route::post('login', [AuthController::class, 'login']);
-    Route::post('forgot-password', [AuthController::class, 'forgotPassword']);
-    Route::post('reset-password', [AuthController::class, 'resetPassword']);
+Route::get('/health', function () {
+    return response()->json(['status' => 'OK']);
 });
 
-// ------------------
-// Protected Routes
-// ------------------
+// Public routes
+Route::post('/auth/register', [AuthController::class, 'register']);
+Route::post('/auth/login', [AuthController::class, 'login']);
+Route::post('/auth/forgot-password', [AuthController::class, 'forgotPassword']);
+Route::post('/auth/reset-password', [AuthController::class, 'resetPassword']);
+
+// Protected routes
 Route::middleware('auth:sanctum')->group(function () {
-
-    // Auth
-    Route::prefix('auth')->group(function () {
-        Route::get('me', [AuthController::class, 'me']);
-        Route::post('logout', [AuthController::class, 'logout']);
-        Route::post('verify-email', [AuthController::class, 'verifyEmail']);
-        Route::post('resend-email-verification', [AuthController::class, 'resendEmailVerification']);
-        Route::post('change-password', [AuthController::class, 'changePassword']);
-        Route::get('profile', [AuthController::class, 'profile']);
+    // Auth routes
+    Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::post('/auth/logout', [AuthController::class, 'logout']);
+    Route::post('/auth/verify-email', [AuthController::class, 'verifyEmail']);
+    Route::post('/auth/resend-email-verification', [AuthController::class, 'resendEmailVerification']);
+    Route::post('/auth/change-password', [AuthController::class, 'changePassword']);
+    Route::get('/user', function (Request $request) {
+        return $request->user();
     });
 
-    // ------------------
-    // Loan Routes
-    // ------------------
-    Route::prefix('loans')->group(function () {
+    // create User
+    Route::post('/users', [AuthController::class, 'createUser']);
 
-        // Statistics
-        Route::get('statistics/user', [LoanController::class, 'statistics']);
+    // User CRUD
+    Route::get('/users', [UserController::class, 'index']);
+    Route::get('/users/{user}', [UserController::class, 'show']);
+    Route::put('/users/{user}', [UserController::class, 'update']);
+    Route::delete('/users/{user}', [UserController::class, 'destroy']);
 
-        // CRUD
-        Route::get('/', [LoanController::class, 'index']);
-        Route::post('/', [LoanController::class, 'store']);
-        Route::get('{loan}', [LoanController::class, 'show']);
-        Route::put('{loan}', [LoanController::class, 'update']);
 
-        // Actions
-        Route::post('{loan}/approve', [LoanController::class, 'approve']);
-        Route::post('{loan}/reject', [LoanController::class, 'reject']);
-        Route::post('{loan}/activate', [LoanController::class, 'activate']);
+    // Loan statistics (must be before {loan} route to avoid conflicts)
+    Route::get('/loans/statistics/user', [LoanController::class, 'statistics']);
 
-        // Documents
-        Route::get('{loan}/documents/{document}/download', [LoanController::class, 'downloadDocument']);
+    // Loan CRUD
+    Route::get('/loans', [LoanController::class, 'index']);
+    Route::post('/loans', [LoanController::class, 'store']);
+    Route::get('/loans/{loan}', [LoanController::class, 'show']);
+    Route::put('/loans/{loan}', [LoanController::class, 'update']);
 
-        // Loan payments
-        Route::get('{loan}/payments', [PaymentController::class, 'index']);
-        Route::post('{loan}/payments', [PaymentController::class, 'store']);
+    // Loan actions
+    Route::post('/loans/{loan}/approve', [LoanController::class, 'approve']);
+    Route::post('/loans/{loan}/reject', [LoanController::class, 'reject']);
+    Route::post('/loans/{loan}/activate', [LoanController::class, 'activate']);
+
+    // Document download
+    Route::get('/loans/{loan}/documents', [LoanController::class, 'indexDocument']);
+    Route::get('/loans/{loan}/documents/{document}/download', [LoanController::class, 'downloadDocument']);
+
+    // Get wallet info for a specific loan
+    Route::get('/loans/{loan}/wallet', [LoanController::class, 'getWalletInfo']);
+
+    // Update wallet info (for lender/admin)
+    Route::post('/loans/{loan}/wallet', [LoanController::class, 'updateWalletInfo']);
+   
+   
+    // ========================================
+    // PAYMENT ROUTES - Organized by user type
+    // ========================================
+
+    // LENDER Payment Routes (for viewing/managing payments)
+    Route::prefix('lender')->group(function () {
+        Route::get('/payments', [PaymentController::class, 'indexForLender']);
+        Route::get('/payments/upcoming', [PaymentController::class, 'upcomingForLender']);
+        Route::get('/payments/overdue', [PaymentController::class, 'overdueForLender']);
+        Route::get('/payments/awaiting-verification', [PaymentController::class, 'awaitingVerificationForLender']);
+        Route::get('/payments/rejected', [PaymentController::class, 'rejectedForLender']);
+        Route::get('/payments/paid', [PaymentController::class, 'paidForLender']);
     });
 
-    // ------------------
-    // Payment Routes
-    // ------------------
-    Route::get('payments/upcoming', [PaymentController::class, 'upcoming']);
-    Route::get('payments/overdue', [PaymentController::class, 'overdue']);
-    Route::get('payments/{payment}', [PaymentController::class, 'show']);
-    Route::post('payments', [PaymentController::class, 'recordPayment']);
+    // BORROWER Payment Routes (for submitting payments)
+    Route::prefix('borrower')->group(function () {
+        Route::post('/payments', [PaymentController::class, 'store']);
+        Route::get('/payments', [PaymentController::class, 'indexForBorrower']);
+    });
 
-    // ------------------
-    // Users / Borrowers / Lenders / Officers
-    // ------------------
-    Route::get('user', fn(Request $request) => $request->user());
+    // GENERAL Payment Routes (accessible by multiple roles)
+    Route::get('/payments/upcoming', [PaymentController::class, 'upcoming']); // Keep for backward compatibility
+    Route::get('/payments/overdue', [PaymentController::class, 'overdue']); // Keep for backward compatibility
 
-    Route::get('borrowers', [BorrowerController::class, 'index']);
-    Route::get('borrowers/{borrower}/loans', [LoanController::class, 'getBorrowerLoans']);
+    // LOAN-SPECIFIC Payment Routes
+    Route::get('/loans/{loan}/payments', [PaymentController::class, 'index']); // Get payments for a specific loan
+    Route::post('/loans/{loan}/payments', [PaymentController::class, 'store']); // Create payment for a loan (deprecated, use /borrower/payments)
 
-    Route::get('lenders', [LenderController::class, 'index']);
-    Route::get('lender/dashboard', [LenderController::class, 'dashboard']);
-    Route::get('loan-officers', [LoanOfficerController::class, 'index']);
+    // LEGACY/ADMIN Payment Routes
 
-    // ------------------
-    // Admin dashboard
-    // ------------------
-    Route::get('admin/dashboard', function () {
-        try {
-            $users = App\Models\User::all();
-            $loans = App\Models\Loan::with(['borrower', 'lender', 'loanOfficer'])->get();
+    // Loan Officer 
+    Route::get('/loan-officers', [LoanOfficerController::class, 'index']);
 
-            return response()->json([
-                'users' => $users,
-                'loans' => $loans,
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Server error fetching dashboard data',
-                'message' => $e->getMessage(),
-            ], 500);
-        }
+    // Lenders
+    Route::get('/lenders', [LenderController::class, 'index']);
+
+    // Borrower
+    Route::get('/borrowers', [BorrowerController::class, 'index']);
+    Route::get('/borrowers/{borrower}', [BorrowerController::class, 'show']);
+    Route::get('/payments/upcoming', [PaymentController::class, 'upcoming']);
+    Route::get('/payments/overdue', [PaymentController::class, 'overdue']);
+    Route::get('/payments', [PaymentController::class, 'adminIndex']);
+    Route::post('/payments', [PaymentController::class, 'recordPayment']);
+    Route::post('/payments/{payment}/verify', [PaymentController::class, 'verifyPayment']);
+    Route::get('/loans/{loan}/payments', [PaymentController::class, 'index']);
+    Route::post('/loans/{loan}/payments', [PaymentController::class, 'store']);
+    Route::get('/payments/{payment}', [PaymentController::class, 'show']);
+    Route::get('/payments/{payment}/proof/download', [PaymentController::class, 'downloadProof']);
+    Route::get('/payments/borrowers/', [PaymentController::class, 'indexByBorrower']);
+
+    // User profile routes
+    Route::prefix('settings')->group(function () {
+        // Current user profile
+        Route::get('/', [SettingsController::class, 'index']);
+        Route::put('/update-profile', [SettingsController::class, 'updateProfile']);
+        Route::put('/update-contact', [SettingsController::class, 'updateContact']);
+        Route::put('/change-password', [SettingsController::class, 'changePassword']);
     });
 });
