@@ -67,8 +67,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Update wallet info (for lender/admin)
     Route::post('/loans/{loan}/wallet', [LoanController::class, 'updateWalletInfo']);
-   
-   
+
+
     // ========================================
     // PAYMENT ROUTES - Organized by user type
     // ========================================
@@ -119,6 +119,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/payments/{payment}', [PaymentController::class, 'show']);
     Route::get('/payments/{payment}/proof/download', [PaymentController::class, 'downloadProof']);
     Route::get('/payments/borrowers/', [PaymentController::class, 'indexByBorrower']);
+    Route::get('/loans/{loanId}/payment-schedule/export-pdf', [PaymentSchedulePDFController::class, 'exportPaymentSchedulePDF']);
 
     // User profile routes
     Route::prefix('settings')->group(function () {
